@@ -1,0 +1,116 @@
+name: Build Intel (x64)
+
+# 本工作流只存在于 fork 的 intel-x64 分支，用于补充上游未发布的 Intel 版本。
+# 发布版本号 = 上游版本号 + 小版本，例如上游 1.5.4 -> v1.5.4.1、v1.5.4.2 ...
+on:
+  push:
+    branches: [intel-x64]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: '构建后发布 Release（版本号自动递增小版本）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: build-x64-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # 在 Apple Silicon runner 上交叉打包 x64（node-pty 自带 darwin-x64 预编译）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 计算发布版本号
+        id: ver
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          git fetch --tags --force -q
+          LAST=$(git tag -l "v${BASE}.*" | sed "s/^v${BASE}\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          NEXT=$(( ${LAST:-0} + 1 ))
+          # push 触发：仅当该上游版本还没有发布过 x64 版本时自动发布
+          # 手动触发：按输入决定，每次递增小版本
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PUBLISH="${{ inputs.release }}"
+          elif [ -z "$LAST" ]; then
+            PUBLISH=true
+          else
+            PUBLISH=false
+          fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "version=${BASE}.${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+          echo "上游版本: $BASE，本次版本: ${BASE}.${NEXT}，发布: $PUBLISH"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 编译
+        run: pnpm run build:all
+
+      - name: 准备 DMG 附加文件
+        run: |
+          mkdir .dmg-staging
+          cp docs/README.md .dmg-staging/README.md
+          cp "docs/提示损坏？点我.command" ".dmg-staging/提示损坏？点我.command"
+          chmod +x ".dmg-staging/提示损坏？点我.command"
+
+      - name: 打包 x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          node .github/x64/make-builder-config.cjs "${{ steps.ver.outputs.version }}" .builder-x64.json
+          pnpm exec electron-builder --mac --x64 --config .builder-x64.json --publish never
+
+      - name: 校验产物架构
+        run: |
+          APP=$(find dist -maxdepth 2 -name "*.app" -type d | head -1)
+          echo "App: $APP"
+          ARCHS=$(lipo -archs "$APP/Contents/MacOS/$(basename "$APP" .app)")
+          echo "主程序架构: $ARCHS"
+          [ "$ARCHS" = "x86_64" ] || { echo "主程序不是 x86_64"; exit 1; }
+          PTY=$(find "$APP" -path "*node-pty/prebuilds/darwin-x64/pty.node" | head -1)
+          [ -n "$PTY" ] || { echo "缺少 node-pty x64 预编译"; exit 1; }
+          echo "node-pty: $(lipo -archs "$PTY")"
+          cd dist && shasum -a 256 *.dmg *.zip | tee SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nigate-${{ steps.ver.outputs.version }}-x64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS.txt
+
+      - name: 发布 Release
+        if: steps.ver.outputs.publish == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          name: Nigate v${{ steps.ver.outputs.version }} (Intel x64)
+          body: |
+            基于上游 [hoochanlon/Free-NTFS-for-Mac v${{ steps.ver.outputs.base }}](https://github.com/hoochanlon/Free-NTFS-for-Mac/releases/tag/v${{ steps.ver.outputs.base }}) 打包的 **Intel (x64)** 版本，代码与上游一致。
+
+            - 适用于 Intel 芯片 Mac；Apple Silicon 请使用上游 arm64 版本
+            - 应用未签名，首次打开如提示损坏，请运行 DMG 内的「提示损坏？点我.command」
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS.txt
