@@ -17,6 +17,17 @@ git checkout intel-x64 && git merge main && git push github intel-x64
 
 推送 `intel-x64` 后自动构建；若该上游版本尚未发布过 x64 版本，则自动发布 Release。
 
+## 上游工作流
+
+本 fork 只运行 `build-x64.yml`。每次构建时会自动禁用其他工作流（含上游带入的），避免重复打包。
+由于禁用发生在运行时，上游新增的工作流在首次同步推送时仍可能被触发一次，同步前可先检查：
+
+```bash
+git diff --stat main upstream/main -- .github/workflows
+```
+
+如有新增，可在 GitHub Actions 页面先手动 Disable，再推送。
+
 ## 版本号
 
 发布版本 = 上游版本 + 小版本，例如上游 `1.5.4` 对应 `v1.5.4.1`、`v1.5.4.2`。

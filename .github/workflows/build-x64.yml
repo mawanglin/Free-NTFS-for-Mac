@@ -18,8 +18,24 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
+  # 同步上游时可能带入上游的工作流，统一禁用，避免在 fork 中重复打包
+  disable-upstream-workflows:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: 禁用除本工作流外的其他工作流
+        run: |
+          gh api "repos/${{ github.repository }}/actions/workflows" --paginate \
+            --jq '.workflows[] | select(.path != ".github/workflows/build-x64.yml" and .state == "active") | "\(.id) \(.path)"' |
+          while read -r id path; do
+            echo "禁用: $path"
+            gh api -X PUT "repos/${{ github.repository }}/actions/workflows/$id/disable"
+          done
+
   build:
     # 在 Apple Silicon runner 上交叉打包 x64（node-pty 自带 darwin-x64 预编译）
     runs-on: macos-14
